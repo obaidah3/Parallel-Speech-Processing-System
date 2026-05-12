@@ -700,7 +700,7 @@ This project serves as a comprehensive example of:
 
 ## License
 
-Academic use permitted. Commercial licensing available upon request.
+MIT License
 
 ## Contact
 
