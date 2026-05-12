@@ -1,22 +1,29 @@
+#include "dsp.h"
 #include "fft_utils.h"
 #include <vector>
 #include <complex>
 #include <algorithm>
 
 // Compute inverse STFT using overlap-add
-void computeISTFT(const std::vector<std::vector<std::complex<float>>>& spectrogram, std::vector<float>& output, int fftSize = 2048, int hopSize = 1024) {
-    FFTUtils fft(fftSize);
+void computeISTFT(const Spectrogram& spectrogram, std::vector<float>& output, int fftSize, int hopSize) {
+    FFTUtils& fft = FFTPlanPool::instance().get(fftSize);
     std::vector<float> window = FFTUtils::generateHannWindow(fftSize);
 
-    int numFrames = spectrogram.size();
+    int numFrames = spectrogram.numFrames();
     int outputSize = (numFrames - 1) * hopSize + fftSize;
     std::vector<float> overlapBuffer(outputSize, 0.0f);
     std::vector<float> windowSum(outputSize, 0.0f);
 
     for (int frame = 0; frame < numFrames; ++frame) {
+        // Prepare frame data
+        std::vector<std::complex<float>> frameSpec(fftSize / 2 + 1);
+        for (int bin = 0; bin < fftSize / 2 + 1; ++bin) {
+            frameSpec[bin] = spectrogram(frame, bin);
+        }
+
         // Inverse FFT
         std::vector<float> frameData;
-        fft.inverse(spectrogram[frame], frameData);
+        fft.inverse(frameSpec, frameData);
 
         // Apply window
         for (int i = 0; i < fftSize; ++i) {

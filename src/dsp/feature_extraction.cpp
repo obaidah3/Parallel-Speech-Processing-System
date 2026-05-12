@@ -1,10 +1,52 @@
-#include "features.h"
-#include <vector>
-#include <complex>
-#include <cmath>
-#include <numeric>
-#include <fstream>
-#include <iostream>
+// Create mel filterbank
+std::vector<std::vector<float>> createMelFilterbank(int numFilters, int fftSize, int sampleRate) {
+    std::vector<std::vector<float>> filterbank(numFilters, std::vector<float>(fftSize / 2 + 1, 0.0f));
+
+    float fMin = 0.0f;
+    float fMax = sampleRate / 2.0f;
+
+    // Convert Hz to mel
+    auto hzToMel = [](float hz) { return 2595.0f * std::log10(1.0f + hz / 700.0f); };
+    auto melToHz = [](float mel) { return 700.0f * (std::pow(10.0f, mel / 2595.0f) - 1.0f); };
+
+    float melMin = hzToMel(fMin);
+    float melMax = hzToMel(fMax);
+
+    std::vector<float> melPoints(numFilters + 2);
+    for (int i = 0; i < numFilters + 2; ++i) {
+        melPoints[i] = melMin + (melMax - melMin) * i / (numFilters + 1);
+    }
+
+    std::vector<float> hzPoints(numFilters + 2);
+    for (int i = 0; i < numFilters + 2; ++i) {
+        hzPoints[i] = melToHz(melPoints[i]);
+    }
+
+    std::vector<int> binPoints(numFilters + 2);
+    for (int i = 0; i < numFilters + 2; ++i) {
+        binPoints[i] = std::floor((fftSize + 1) * hzPoints[i] / sampleRate);
+    }
+
+    for (int m = 1; m <= numFilters; ++m) {
+        int fLeft = binPoints[m - 1];
+        int fCenter = binPoints[m];
+        int fRight = binPoints[m + 1];
+
+        for (int k = fLeft; k < fCenter; ++k) {
+            if (k >= 0 && k < static_cast<int>(filterbank[m - 1].size())) {
+                filterbank[m - 1][k] = (k - fLeft) / static_cast<float>(fCenter - fLeft);
+            }
+        }
+
+        for (int k = fCenter; k < fRight; ++k) {
+            if (k >= 0 && k < static_cast<int>(filterbank[m - 1].size())) {
+                filterbank[m - 1][k] = (fRight - k) / static_cast<float>(fRight - fCenter);
+            }
+        }
+    }
+
+    return filterbank;
+}
 
 // Calculate RMS energy
 float calculateRMS(const std::vector<float>& samples) {
@@ -81,18 +123,42 @@ float calculateSpectralFlatness(const std::vector<std::complex<float>>& frame) {
     return arithmeticMean > 0 ? geometricMean / arithmeticMean : 0.0f;
 }
 
-// Extract MFCC (simplified implementation)
+// Extract MFCC coefficients using mel filterbank and DCT
 std::vector<float> extractMFCC(const std::vector<std::complex<float>>& frame, int sampleRate, int numCoeffs) {
-    // Simplified MFCC: just return magnitude spectrum as coefficients
-    std::vector<float> mfcc(numCoeffs);
-    for (int i = 0; i < numCoeffs && i < static_cast<int>(frame.size()); ++i) {
-        mfcc[i] = std::abs(frame[i]);
+    int fftSize = (frame.size() - 1) * 2;
+    int numFilters = 26; // Standard number of mel filters
+
+    // Convert to power spectrum
+    std::vector<float> powerSpec(frame.size());
+    for (size_t i = 0; i < frame.size(); ++i) {
+        powerSpec[i] = std::norm(frame[i]); // |z|^2
     }
+
+    // Mel filterbank
+    std::vector<std::vector<float>> melFilterbank = createMelFilterbank(numFilters, fftSize, sampleRate);
+    std::vector<float> melEnergies(numFilters, 0.0f);
+
+    for (int f = 0; f < numFilters; ++f) {
+        for (size_t k = 0; k < powerSpec.size(); ++k) {
+            melEnergies[f] += powerSpec[k] * melFilterbank[f][k];
+        }
+        // Log compression
+        melEnergies[f] = std::log(std::max(melEnergies[f], 1e-10f));
+    }
+
+    // Discrete Cosine Transform (DCT)
+    std::vector<float> mfcc(numCoeffs, 0.0f);
+    for (int n = 0; n < numCoeffs; ++n) {
+        for (int k = 0; k < numFilters; ++k) {
+            mfcc[n] += melEnergies[k] * std::cos(M_PI * n * (k + 0.5f) / numFilters);
+        }
+    }
+
     return mfcc;
 }
 
 // Extract features from spectrogram and save to CSV
-void extractFeatures(const std::vector<std::vector<std::complex<float>>>& spectrogram, int sampleRate, const std::string& outputFile) {
+void extractFeatures(const Spectrogram& spectrogram, int sampleRate, const std::string& outputFile) {
     std::ofstream file(outputFile);
     file << "Frame,RMS,ZCR,Centroid,Bandwidth,Flatness";
 
@@ -101,8 +167,16 @@ void extractFeatures(const std::vector<std::vector<std::complex<float>>>& spectr
     }
     file << "\n";
 
-    for (size_t frame = 0; frame < spectrogram.size(); ++frame) {
-        const auto& specFrame = spectrogram[frame];
+    int numFrames = spectrogram.numFrames();
+    std::vector<std::string> frameLines(numFrames);
+
+    #pragma omp parallel for
+    for (int frame = 0; frame < numFrames; ++frame) {
+        // Extract frame data
+        std::vector<std::complex<float>> specFrame(spectrogram.numBins());
+        for (int bin = 0; bin < spectrogram.numBins(); ++bin) {
+            specFrame[bin] = spectrogram(frame, bin);
+        }
 
         // Convert complex to real for RMS and ZCR (simplified)
         std::vector<float> realFrame(specFrame.size());
@@ -117,11 +191,17 @@ void extractFeatures(const std::vector<std::vector<std::complex<float>>>& spectr
         float flatness = calculateSpectralFlatness(specFrame);
         auto mfcc = extractMFCC(specFrame, sampleRate, 13);
 
-        file << frame << "," << rms << "," << zcr << "," << centroid << "," << bandwidth << "," << flatness;
+        std::ostringstream oss;
+        oss << frame << "," << rms << "," << zcr << "," << centroid << "," << bandwidth << "," << flatness;
         for (float coeff : mfcc) {
-            file << "," << coeff;
+            oss << "," << coeff;
         }
-        file << "\n";
+        frameLines[frame] = oss.str();
+    }
+
+    // Write results sequentially to avoid I/O contention
+    for (const auto& line : frameLines) {
+        file << line << "\n";
     }
 
     file.close();

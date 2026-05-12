@@ -2,54 +2,68 @@
 #include "audio.h"
 #include "dsp.h"
 #include "fft_utils.h"
-#include "features.h"
+#include "audio_features.h"
 #include "timing.h"
 #include <omp.h>
 #include <iostream>
 
 // OpenMP parallel STFT
-void ompStft(std::vector<std::vector<std::complex<float>>>& spectrogram, const std::vector<float>& samples, int fftSize, int hopSize) {
-    FFTUtils fft(fftSize);
+void ompStft(Spectrogram& spectrogram, const std::vector<float>& samples, int fftSize, int hopSize) {
     std::vector<float> window = FFTUtils::generateHannWindow(fftSize);
 
     int numFrames = (samples.size() - fftSize) / hopSize + 1;
-    spectrogram.resize(numFrames, std::vector<std::complex<float>>(fftSize / 2 + 1));
+    spectrogram.resize(numFrames, fftSize / 2 + 1);
 
-    #pragma omp parallel for
-    for (int frame = 0; frame < numFrames; ++frame) {
-        int start = frame * hopSize;
-        std::vector<float> frameData(fftSize, 0.0f);
+    #pragma omp parallel
+    {
+        // Thread-local buffers to avoid allocation overhead
+        std::vector<float> frameData(fftSize);
+        std::vector<std::complex<float>> frameSpec(fftSize / 2 + 1);
 
-        // Copy samples to frame
-        int copySize = std::min(fftSize, static_cast<int>(samples.size() - start));
-        std::copy(samples.begin() + start, samples.begin() + start + copySize, frameData.begin());
+        #pragma omp for schedule(dynamic)
+        for (int frame = 0; frame < numFrames; ++frame) {
+            int start = frame * hopSize;
 
-        // Apply window
-        for (int i = 0; i < fftSize; ++i) {
-            frameData[i] *= window[i];
-        }
+            // Zero the frame buffer
+            std::fill(frameData.begin(), frameData.end(), 0.0f);
 
-        // Compute FFT
-        fft.forward(frameData, spectrogram[frame]);
+            // Copy samples to frame
+            int copySize = std::min(fftSize, static_cast<int>(samples.size() - start));
+            std::copy(samples.begin() + start, samples.begin() + start + copySize, frameData.begin());
 
-        if (frame == 0) {
-            #pragma omp critical
-            std::cout << "OpenMP: Thread " << omp_get_thread_num() << " processing frame " << frame << std::endl;
+            // Apply window
+            for (int i = 0; i < fftSize; ++i) {
+                frameData[i] *= window[i];
+            }
+
+            // Compute FFT using a thread-local plan
+            FFTUtils& fft = FFTPlanPool::instance().get(fftSize);
+            fft.forward(frameData, frameSpec);
+            for (int bin = 0; bin < fftSize / 2 + 1; ++bin) {
+                spectrogram(frame, bin) = frameSpec[bin];
+            }
+
+            if (frame == 0) {
+                #pragma omp critical
+                std::cout << "OpenMP: Thread " << omp_get_thread_num() << " processing frame " << frame << std::endl;
+            }
         }
     }
 }
 
 // OpenMP parallel filtering
-void ompFiltering(std::vector<std::vector<std::complex<float>>>& spectrogram, int sampleRate) {
+void ompFiltering(Spectrogram& spectrogram, int sampleRate) {
     #pragma omp parallel for
-    for (size_t frame = 0; frame < spectrogram.size(); ++frame) {
-        applySpeechFilter(spectrogram[frame], sampleRate);
+    for (int frame = 0; frame < spectrogram.numFrames(); ++frame) {
+        std::vector<std::complex<float>> frameData(spectrogram.numBins());
+        for (int bin = 0; bin < spectrogram.numBins(); ++bin) {
+            frameData[bin] = spectrogram(frame, bin);
+        }
+        applySpeechFilter(frameData, sampleRate);
+        for (int bin = 0; bin < spectrogram.numBins(); ++bin) {
+            spectrogram(frame, bin) = frameData[bin];
+        }
     }
-}
-
-// OpenMP parallel feature extraction
-void ompFeatureExtraction(const std::vector<std::vector<std::complex<float>>>& spectrogram, int sampleRate, const std::string& outputFile) {
-    extractFeatures(spectrogram, sampleRate, outputFile);
 }
 
 // Full OpenMP-only pipeline (no MPI)
@@ -67,14 +81,14 @@ void runOmpPipeline(const std::string& inputFile, const std::string& outputFile,
     applyPreEmphasis(samples);
 
     // STFT with OpenMP
-    std::vector<std::vector<std::complex<float>>> spectrogram;
+    Spectrogram spectrogram(0, 0);
     ompStft(spectrogram, samples, 2048, 1024);
 
     // Filtering with OpenMP
     ompFiltering(spectrogram, sampleRate);
 
-    // Feature extraction with OpenMP
-    ompFeatureExtraction(spectrogram, sampleRate, featuresFile);
+    // Feature extraction
+    extractFeatures(spectrogram, sampleRate, featuresFile);
 
     // ISTFT
     std::vector<float> reconstructed;

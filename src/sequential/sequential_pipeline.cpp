@@ -1,7 +1,7 @@
 #include "audio.h"
 #include "dsp.h"
 #include "fft_utils.h"
-#include "features.h"
+#include "audio_features.h"
 #include "timing.h"
 #include <vector>
 #include <complex>
@@ -22,12 +22,19 @@ void runSequentialPipeline(const std::string& inputFile, const std::string& outp
     applyPreEmphasis(samples);
 
     // STFT
-    std::vector<std::vector<std::complex<float>>> spectrogram;
+    Spectrogram spectrogram(0, 0);
     computeSTFT(samples, spectrogram);
 
     // Filtering
-    for (auto& frame : spectrogram) {
-        applySpeechFilter(frame, sampleRate);
+    for (int frame = 0; frame < spectrogram.numFrames(); ++frame) {
+        std::vector<std::complex<float>> frameData(spectrogram.numBins());
+        for (int bin = 0; bin < spectrogram.numBins(); ++bin) {
+            frameData[bin] = spectrogram(frame, bin);
+        }
+        applySpeechFilter(frameData, sampleRate);
+        for (int bin = 0; bin < spectrogram.numBins(); ++bin) {
+            spectrogram(frame, bin) = frameData[bin];
+        }
     }
 
     // Feature extraction

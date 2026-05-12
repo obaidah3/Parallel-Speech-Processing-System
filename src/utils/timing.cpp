@@ -1,4 +1,5 @@
 #include "timing.h"
+#include <fstream>
 #include <mpi.h>
 
 // Timer implementation

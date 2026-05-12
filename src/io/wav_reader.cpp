@@ -1,5 +1,6 @@
 #include "audio.h"
 #include <sndfile.h>
+#include <cstring>
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
