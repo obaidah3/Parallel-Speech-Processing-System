@@ -1,0 +1,13 @@
+# Data
+data/
+dataset/
+*.wav
+*.mp3
+
+# Build
+build/
+*.o
+*.out
+
+# IDE
+.vscode/
